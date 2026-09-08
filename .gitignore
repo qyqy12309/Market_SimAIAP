@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated simulation data
+data/raw/
+*.parquet
+
+# Model / experiment outputs if added later
+models/
+checkpoints/
+
+# Environment variables / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
