@@ -4,6 +4,7 @@ from .order import Side
 
 
 class NoiseTrader:
+
     def __init__(
         self,
         trader_id,
@@ -13,44 +14,135 @@ class NoiseTrader:
     ):
         self.trader_id = trader_id
 
-        self.participation_rate = participation_rate
-        self.max_price_offset = max_price_offset
-        self.max_quantity = max_quantity
+        self.participation_rate = (
+            participation_rate
+        )
+
+        self.max_price_offset = (
+            max_price_offset
+        )
+
+        self.max_quantity = (
+            max_quantity
+        )
+
 
     def act(
         self,
         market,
         rng: random.Random,
+        regime_config=None,
     ):
-        # Decide whether this trader participates this tick
-        if rng.random() >= self.participation_rate:
+
+        # ==============================================
+        # PARTICIPATION
+        # ==============================================
+
+        effective_participation_rate = (
+            self.participation_rate
+        )
+
+        if regime_config is not None:
+
+            effective_participation_rate *= (
+                regime_config
+                .participation_multiplier
+            )
+
+        effective_participation_rate = min(
+            effective_participation_rate,
+            1.0,
+        )
+
+        if (
+            rng.random()
+            >= effective_participation_rate
+        ):
             return
 
-        # Randomly choose buy or sell
-        side = rng.choice(
-            [
-                Side.BUY,
-                Side.SELL,
-            ]
+
+        # ==============================================
+        # BUY / SELL BIAS
+        # ==============================================
+
+        buy_probability = 0.50
+
+        if regime_config is not None:
+
+            buy_probability = (
+                regime_config.buy_probability
+            )
+
+
+        if rng.random() < buy_probability:
+
+            side = Side.BUY
+
+        else:
+
+            side = Side.SELL
+
+
+        # ==============================================
+        # PRICE OFFSET
+        # ==============================================
+
+        effective_price_offset = (
+            self.max_price_offset
         )
 
-        # Price somewhere around the last traded price
+        if regime_config is not None:
+
+            effective_price_offset *= (
+                regime_config
+                .price_offset_multiplier
+            )
+
+
         offset = rng.uniform(
-            -self.max_price_offset,
-            self.max_price_offset,
+            -effective_price_offset,
+            effective_price_offset,
         )
+
 
         price = round(
-            market.last_price * (1 + offset)
+            market.last_price
+            * (1 + offset)
         )
 
-        # Prevent impossible/non-positive price
-        price = max(price, 1)
+        price = max(
+            price,
+            1,
+        )
+
+
+        # ==============================================
+        # ORDER SIZE
+        # ==============================================
 
         quantity = rng.randint(
             1,
             self.max_quantity,
         )
+
+
+        if regime_config is not None:
+
+            quantity = round(
+                quantity
+                * regime_config.size_multiplier
+            )
+
+
+        quantity = max(
+            quantity,
+            1,
+        )
+
+
+        # ==============================================
+        # SUBMIT ORDER
+        # ==============================================
 
         market.submit_order(
             trader_id=self.trader_id,
@@ -59,7 +151,6 @@ class NoiseTrader:
             quantity=quantity,
             trader_type="noise",
         )
-
 class MomentumTrader:
     def __init__(
         self,

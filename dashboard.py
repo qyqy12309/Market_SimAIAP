@@ -1,11 +1,15 @@
 import time
+from copy import deepcopy
+from src.config import DEFAULT_CONFIG
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from src.simulation import Simulation
-
+from src.ml.decision_tree import DecisionTreeForecaster
+from src.ml.linear_regression import LinearRegressionForecaster
+from src.ml.autoreg import AutoRegForecaster
 
 st.set_page_config(
     page_title="Market Simulator",
@@ -16,21 +20,28 @@ st.set_page_config(
 # ==========================================================
 # INITIAL STATE
 # ==========================================================
+if "config" not in st.session_state:
+    st.session_state.config = deepcopy(
+        DEFAULT_CONFIG
+    )
+
+cfg = st.session_state.config
 
 if "simulation" not in st.session_state:
     st.session_state.simulation = Simulation(
-        seed=42,
-        num_traders=1000,
-        participation_rate=0.0005,
-        initial_price=10000,
-        ticks_per_candle=10,
+        config=deepcopy(
+            st.session_state.config
+        )
     )
 
 if "running" not in st.session_state:
     st.session_state.running = False
 
 if "speed" not in st.session_state:
-    st.session_state.speed = 10
+    st.session_state.speed = (
+        cfg.dashboard
+        .default_speed
+    )
 
 if "last_update" not in st.session_state:
     st.session_state.last_update = time.monotonic()
@@ -38,6 +49,51 @@ if "last_update" not in st.session_state:
 if "tick_budget" not in st.session_state:
     st.session_state.tick_budget = 0.0
 
+if "forecast_model" not in st.session_state:
+    st.session_state.forecast_model = cfg.forecast.default_model
+
+if "decision_tree_forecaster" not in st.session_state:
+    st.session_state.decision_tree_forecaster = (
+        DecisionTreeForecaster(
+            lookback=(
+                cfg.decision_tree.lookback
+            ),
+            horizon=(
+                cfg.decision_tree.horizon
+            ),
+            max_depth=(
+                cfg.decision_tree.max_depth
+            ),
+            min_samples_leaf=(
+                cfg.decision_tree.min_samples_leaf
+            ),
+        )
+    )
+if "active_forecast" not in st.session_state:
+    st.session_state.active_forecast = None
+
+if "linear_regression_forecaster" not in st.session_state:
+
+    st.session_state.linear_regression_forecaster = (
+        LinearRegressionForecaster(
+            lookback=(
+                cfg.linear_regression.lookback
+            ),
+            horizon=(
+                cfg.linear_regression.horizon
+            ),
+        )
+    )
+
+if "autoreg_forecaster" not in st.session_state:
+
+    st.session_state.autoreg_forecaster = (
+        AutoRegForecaster(
+            lookback= cfg.autoreg.lookback,
+            horizon= cfg.autoreg.horizon,
+            lags= cfg.autoreg.lags,
+            minimum_training_candles= cfg.autoreg.minimum_training_candles
+            ))
 
 # ==========================================================
 # HEADER
@@ -55,7 +111,6 @@ def live_dashboard():
 
     simulation = st.session_state.simulation
     market = simulation.market
-    stats = market.get_statistics()
 
     # ------------------------------------------------------
     # SIMULATION TIMER
@@ -140,27 +195,12 @@ def live_dashboard():
 
     with controls[3]:
 
-        if st.button(
-            "Reset",
-            use_container_width=True,
-        ):
+        if st.button("Reset", use_container_width=True):
 
             st.session_state.running = False
-
-            st.session_state.simulation = Simulation(
-                seed=42,
-                num_traders=1000,
-                participation_rate=0.0005,
-                initial_price=10000,
-                ticks_per_candle=10,
-            )
-
+            st.session_state.simulation = Simulation(config=deepcopy(st.session_state.config))
             st.session_state.tick_budget = 0.0
-
-            st.session_state.last_update = (
-                time.monotonic()
-            )
-
+            st.session_state.last_update = (time.monotonic())
             st.rerun()
 
 
@@ -180,10 +220,44 @@ def live_dashboard():
         )
 
 
-    # Refresh references in case reset occurred
+    # Refresh references after simulation update/reset
     simulation = st.session_state.simulation
     market = simulation.market
+    stats = market.get_statistics()
 
+    # ------------------------------------------------------
+    # FORECAST
+    # ------------------------------------------------------
+
+    predicted_candles = []
+
+    if (
+        st.session_state.forecast_model
+        == "Decision Tree"
+    ):
+
+        forecaster = (
+            st.session_state.decision_tree_forecaster
+        )
+
+        minimum_candles = (
+            forecaster.lookback
+            + forecaster.horizon
+        )
+
+        if len(market.candles) >= minimum_candles:
+
+            fitted = forecaster.fit(
+                market.candles
+            )
+
+            if fitted:
+
+                predicted_candles = (
+                    forecaster.predict(
+                        market.candles
+                    )
+                )
 
     # ------------------------------------------------------
     # STATUS
@@ -211,6 +285,196 @@ def live_dashboard():
             "All",
         ],
         index=1,
+    )
+
+    forecast_model = st.selectbox(
+        "Forecast Model",
+        [
+            "None",
+            "Decision Tree",
+            "Linear Regression",
+            "AutoReg",
+        ],
+        key="forecast_model",
+    )
+    forecast_lag = st.slider(
+        "Forecast lag (candles)",
+
+        min_value=(
+            cfg.forecast
+            .min_forecast_lag
+        ),
+
+        max_value=(
+            cfg.forecast
+            .max_forecast_lag
+        ),
+
+        value=(
+            cfg.forecast
+            .forecast_lag
+        ),
+
+        step=(
+            cfg.forecast
+            .forecast_lag_step
+        ),
+
+        disabled=(
+            forecast_model
+            == "None"
+        ),
+    )
+
+    forecast_length = st.slider(
+        "Prediction length (candles)",
+
+        min_value=(
+            cfg.forecast
+            .min_forecast_length
+        ),
+
+        max_value=(
+            cfg.forecast
+            .max_forecast_length
+        ),
+
+        value=(
+            cfg.forecast
+            .forecast_length
+        ),
+
+        step=1,
+
+        disabled=(
+            forecast_model
+            == "None"
+        ),
+    )
+    # ======================================================
+    # FORECAST GENERATION
+    # ======================================================
+
+    forecaster = None
+    predicted_candles = []
+    forecast_ticks = []
+
+    if forecast_model == "Decision Tree":
+
+        forecaster = (
+            st.session_state.decision_tree_forecaster
+        )
+
+    elif forecast_model == "Linear Regression":
+
+        forecaster = (
+            st.session_state.linear_regression_forecaster
+        )
+    elif forecast_model == "AutoReg":
+
+        forecaster = (
+            st.session_state.autoreg_forecaster
+        )
+
+    if forecaster is not None:
+
+        total_candles = len(
+            market.candles
+        )
+
+        minimum_training_candles = getattr(
+            forecaster,
+            "minimum_training_candles",
+            (
+                forecaster.lookback
+                + forecaster.horizon
+            ),
+        )
+
+        minimum_required = (
+            minimum_training_candles
+            + forecast_lag
+        )
+
+        if total_candles >= minimum_required:
+
+            forecast_origin_index = (
+                total_candles
+                - forecast_lag
+            )
+
+            training_candles = (
+                market.candles[
+                    :forecast_origin_index
+                ]
+            )
+
+            fitted = forecaster.fit(
+                training_candles
+            )
+
+            if fitted:
+
+                predicted_candles = (
+                    forecaster.predict_recursive(
+                        training_candles,
+                        steps=forecast_length,
+                    )
+                )
+
+                forecast_start_tick = (
+                    training_candles[-1].end_tick
+                )
+
+                forecast_ticks = [
+                    forecast_start_tick
+                    + (
+                        i
+                        * market.ticks_per_candle
+                    )
+                    for i in range(
+                        len(predicted_candles)
+                    )
+                ]
+
+                st.caption(
+                    f"{forecast_model}: "
+                    f"{len(predicted_candles)} "
+                    f"candles predicted from "
+                    f"{forecast_lag} candles ago"
+                )
+
+        else:
+
+            st.caption(
+                "Waiting for enough history..."
+            )
+
+    show_order_bars = st.checkbox(
+        "Show Order Book Bars",
+
+        value=(
+            cfg.dashboard
+            .show_order_bars
+        ),
+    )
+
+    depth_levels_chart = st.slider(
+        "Order Book Levels",
+
+        min_value=5,
+        max_value=30,
+
+        value=(
+            cfg.dashboard
+            .order_book_levels
+        ),
+
+        step=1,
+
+        disabled=(
+            not show_order_bars
+        ),
     )
 
     # ------------------------------------------------------
@@ -494,6 +758,70 @@ def live_dashboard():
     fig = go.Figure()
 
 
+    # ======================================================
+    # FROZEN FORECAST CANDLES
+    # Draw first so they remain underneath actual candles
+    # ======================================================
+
+    if predicted_candles:
+
+        forecast_open = [
+            candle["open"] / 100
+            for candle in predicted_candles
+        ]
+
+        forecast_high = [
+            candle["high"] / 100
+            for candle in predicted_candles
+        ]
+
+        forecast_low = [
+            candle["low"] / 100
+            for candle in predicted_candles
+        ]
+
+        forecast_close = [
+            candle["close"] / 100
+            for candle in predicted_candles
+        ]
+
+        fig.add_trace(
+            go.Candlestick(
+                x=forecast_ticks,
+
+                open=forecast_open,
+                high=forecast_high,
+                low=forecast_low,
+                close=forecast_close,
+
+                increasing=dict(
+                    line=dict(
+                        color="rgba(190, 190, 190, 0.90)",
+                        width=2,
+                    ),
+                    fillcolor="rgba(150, 150, 150, 0.25)",
+                ),
+
+                decreasing=dict(
+                    line=dict(
+                        color="rgba(190, 190, 190, 0.90)",
+                        width=2,
+                    ),
+                    fillcolor="rgba(150, 150, 150, 0.25)",
+                ),
+
+                name="Decision Tree Forecast",
+
+                opacity=0.70,
+            )
+        )
+
+
+    # ======================================================
+    # ACTUAL CANDLES
+    # Draw second so they overlay the gray forecast
+    # ======================================================
+
     fig.add_trace(
         go.Candlestick(
             x=df_chart["start_tick"],
@@ -503,10 +831,359 @@ def live_dashboard():
             low=df_chart["low"],
             close=df_chart["close"],
 
-            name="Price",
+            name="Actual",
         )
     )
+    # ======================================================
+    # FROZEN FORECAST CANDLES
+    # ======================================================
 
+    if predicted_candles:
+
+        forecast_open = [
+            candle["open"] / 100
+            for candle in predicted_candles
+        ]
+
+        forecast_high = [
+            candle["high"] / 100
+            for candle in predicted_candles
+        ]
+
+        forecast_low = [
+            candle["low"] / 100
+            for candle in predicted_candles
+        ]
+
+        forecast_close = [
+            candle["close"] / 100
+            for candle in predicted_candles
+        ]
+
+
+        fig.add_trace(
+            go.Candlestick(
+                x=forecast_ticks,
+
+                open=forecast_open,
+                high=forecast_high,
+                low=forecast_low,
+                close=forecast_close,
+
+                increasing=dict(
+                    line=dict(
+                        color="rgba(190, 190, 190, 0.85)",
+                        width=2,
+                    ),
+
+                    fillcolor=(
+                        "rgba(150, 150, 150, 0.25)"
+                    ),
+                ),
+
+                decreasing=dict(
+                    line=dict(
+                        color="rgba(190, 190, 190, 0.85)",
+                        width=2,
+                    ),
+
+                    fillcolor=(
+                        "rgba(150, 150, 150, 0.25)"
+                    ),
+                ),
+
+                name="Decision Tree Forecast",
+
+                opacity=0.70,
+            )
+        )
+
+    # ======================================================
+    # CHART BOUNDS
+    # ======================================================
+
+    if not df_chart.empty:
+
+        chart_min_tick = (
+            df_chart["start_tick"].min()
+        )
+
+        chart_max_tick = (
+            df_chart["start_tick"].max()
+        )
+
+        chart_width = max(
+            chart_max_tick
+            - chart_min_tick,
+            10,
+        )
+
+    else:
+
+        chart_min_tick = 0
+        chart_max_tick = market.tick
+        chart_width = 100
+
+    # ======================================================
+    # ORDER BOOK DEPTH BARS
+    # ======================================================
+
+    if show_order_bars:
+
+        # ----------------------------------------------
+        # FIND VISIBLE ORDER BOOK LEVELS
+        # ----------------------------------------------
+
+        ask_prices = sorted(
+            market.orderbook.asks.keys()
+        )[:depth_levels_chart]
+
+        bid_prices = sorted(
+            market.orderbook.bids.keys(),
+            reverse=True,
+        )[:depth_levels_chart]
+
+
+        ask_depths = {
+            price: sum(
+                order.quantity
+                for order
+                in market.orderbook.asks[price]
+            )
+            for price in ask_prices
+        }
+
+        bid_depths = {
+            price: sum(
+                order.quantity
+                for order
+                in market.orderbook.bids[price]
+            )
+            for price in bid_prices
+        }
+
+
+        # ----------------------------------------------
+        # NORMALISATION
+        # ----------------------------------------------
+
+        all_depths = (
+            list(ask_depths.values())
+            + list(bid_depths.values())
+        )
+
+        max_depth = (
+            max(all_depths)
+            if all_depths
+            else 1
+        )
+
+
+        # ----------------------------------------------
+        # DETERMINE WHERE BARS START
+        # ----------------------------------------------
+
+        # Leave some empty space between candles
+        # and the order-book visualization.
+
+        bar_start = (
+            chart_max_tick
+            + chart_width * 0.05
+        )
+
+        max_bar_width = (
+            chart_width * 0.20
+        )
+
+        # ----------------------------------------------
+        # ASK BARS
+        # ----------------------------------------------
+
+        for price, quantity in ask_depths.items():
+
+            bar_width = (
+                quantity
+                / max_depth
+                * max_bar_width
+            )
+
+            order_count = len(
+                market.orderbook.asks[price]
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[
+                        bar_start,
+                        bar_start + bar_width,
+                    ],
+
+                    y=[
+                        price / 100,
+                        price / 100,
+                    ],
+
+                    mode="lines+text",
+
+                    line=dict(
+                        color="red",
+                        width=4,
+                    ),
+
+                    text=[
+                        "",
+                        str(quantity),
+                    ],
+
+                    textposition="middle right",
+
+                    customdata=[
+                        [quantity, order_count],
+                        [quantity, order_count],
+                    ],
+
+                    hovertemplate=(
+                        "<b>ASK</b><br>"
+                        "Price: $%{y:.2f}<br>"
+                        "Quantity: %{customdata[0]}<br>"
+                        "Orders: %{customdata[1]}"
+                        "<extra></extra>"
+                    ),
+
+                    showlegend=False,
+                )
+            )
+
+        # ----------------------------------------------
+        # BID BARS
+        # ----------------------------------------------
+
+        for price, quantity in bid_depths.items():
+
+            bar_width = (
+                quantity
+                / max_depth
+                * max_bar_width
+            )
+
+            order_count = len(
+                market.orderbook.bids[price]
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[
+                        bar_start,
+                        bar_start + bar_width,
+                    ],
+
+                    y=[
+                        price / 100,
+                        price / 100,
+                    ],
+
+                    mode="lines+text",
+
+                    line=dict(
+                        color="lime",
+                        width=4,
+                    ),
+
+                    text=[
+                        "",
+                        str(quantity),
+                    ],
+
+                    textposition="middle right",
+
+                    customdata=[
+                        [quantity, order_count],
+                        [quantity, order_count],
+                    ],
+
+                    hovertemplate=(
+                        "<b>BID</b><br>"
+                        "Price: $%{y:.2f}<br>"
+                        "Quantity: %{customdata[0]}<br>"
+                        "Orders: %{customdata[1]}"
+                        "<extra></extra>"
+                    ),
+
+                    showlegend=False,
+                )
+            )
+    # ======================================================
+    # DETERMINE FORECAST END
+    # ======================================================
+    if forecast_ticks:
+        forecast_end_tick = (
+            forecast_ticks[-1]
+            + market.ticks_per_candle
+        )
+
+    else:
+
+        forecast_end_tick = (
+            market.tick
+        )
+
+    # ======================================================
+    # DETERMINE X-AXIS END
+    # ======================================================
+    if show_order_bars:
+
+        order_bar_end = (
+            bar_start
+            + max_bar_width
+            + chart_width * 0.05
+        )
+
+        x_axis_max = max(
+            order_bar_end,
+            forecast_end_tick,
+        )
+
+    elif predicted_candles:
+
+        x_axis_max = (
+            forecast_end_tick
+            + market.ticks_per_candle
+        )
+
+    else:
+
+        x_axis_max = None
+
+    # ======================================================
+    # FORECAST ORIGIN MARKER
+    # ======================================================
+
+    active_forecast = (
+        st.session_state.active_forecast
+    )
+
+    if active_forecast is not None:
+
+        fig.add_annotation(
+            x=active_forecast["created_at_tick"],
+            y=1,
+            yref="paper",
+
+            text="Forecast made here",
+
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1,
+
+            ax=0,
+            ay=-35,
+
+            xanchor="center",
+            yanchor="bottom",
+
+            opacity=0.7,
+        )
 
     fig.update_layout(
         xaxis_title="Tick",
@@ -526,6 +1203,18 @@ def live_dashboard():
         showlegend=False,
     )
 
+
+    if (
+        show_order_bars
+        or predicted_candles
+    ):
+
+        fig.update_xaxes(
+            range=[
+                chart_min_tick,
+                x_axis_max,
+            ]
+        )
 
     st.plotly_chart(
         fig,
@@ -665,7 +1354,7 @@ def live_dashboard():
         st.metric(
             "Total Volume",
             f"{stats['total_volume']:,}",
-)
+        )
 
         total_bid_depth = sum(
             order.quantity
