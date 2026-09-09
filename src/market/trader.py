@@ -53,11 +53,245 @@ class NoiseTrader:
         )
 
         market.submit_order(
-        trader_id=self.trader_id,
-        side=side,
-        price=price,
-        quantity=quantity,
-    )
+            trader_id=self.trader_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            trader_type="noise",
+        )
+
+class MomentumTrader:
+    def __init__(
+        self,
+        trader_id,
+        lookback=20,
+        threshold_cents=5,
+        quantity=5,
+        participation_rate=0.1,
+        price_offset_cents=0,
+    ):
+        self.trader_id = trader_id
+        self.lookback = lookback
+        self.threshold_cents = threshold_cents
+        self.quantity = quantity
+        self.participation_rate = participation_rate
+        self.price_offset_cents = price_offset_cents
+
+    def act(
+        self,
+        market,
+        rng: random.Random,
+    ):
+        # Not enough history yet
+        if len(market.snapshots) < self.lookback:
+            return
+
+        # Optional participation filter
+        if rng.random() >= self.participation_rate:
+            return
+
+        current_price = market.last_price
+
+        past_snapshot = market.snapshots[
+            -self.lookback
+        ]
+
+        past_price = past_snapshot.last_price
+
+        momentum = (
+            current_price
+            - past_price
+        )
+
+        # ---------------------------------------------
+        # UPWARD MOMENTUM -> BUY
+        # ---------------------------------------------
+
+        if momentum >= self.threshold_cents:
+
+            side = Side.BUY
+
+            price = (
+                current_price
+                + self.price_offset_cents
+            )
+
+        # ---------------------------------------------
+        # DOWNWARD MOMENTUM -> SELL
+        # ---------------------------------------------
+
+        elif momentum <= -self.threshold_cents:
+
+            side = Side.SELL
+
+            price = (
+                current_price
+                - self.price_offset_cents
+            )
+
+        else:
+            return
+
+        price = max(
+            price,
+            1,
+        )
+
+        market.submit_order(
+            trader_id=self.trader_id,
+            side=side,
+            price=price,
+            quantity=self.quantity,
+            trader_type="momentum",
+        )
+
+class MeanReversionTrader:
+    def __init__(
+        self,
+        trader_id,
+        lookback=20,
+        threshold_cents=5,
+        quantity=5,
+        participation_rate=0.1,
+    ):
+        self.trader_id = trader_id
+        self.lookback = lookback
+        self.threshold_cents = threshold_cents
+        self.quantity = quantity
+        self.participation_rate = participation_rate
+
+    def act(
+        self,
+        market,
+        rng: random.Random,
+    ):
+        if len(market.snapshots) < self.lookback:
+            return
+
+        if rng.random() >= self.participation_rate:
+            return
+
+        current_price = market.last_price
+
+        past_price = (
+            market.snapshots[
+                -self.lookback
+            ].last_price
+        )
+
+        move = (
+            current_price
+            - past_price
+        )
+
+        # Price rose strongly -> sell
+        if move >= self.threshold_cents:
+            side = Side.SELL
+            price = current_price
+
+        # Price fell strongly -> buy
+        elif move <= -self.threshold_cents:
+            side = Side.BUY
+            price = current_price
+
+        else:
+            return
+
+        market.submit_order(
+            trader_id=self.trader_id,
+            side=side,
+            price=price,
+            quantity=self.quantity,
+            trader_type="mean_reversion",
+        )
+
+class LiquidityTaker:
+    def __init__(
+        self,
+        trader_id,
+        participation_rate=0.05,
+        imbalance_threshold=0.4,
+        max_spread_cents=5,
+        quantity=5,
+    ):
+        self.trader_id = trader_id
+        self.participation_rate = participation_rate
+        self.imbalance_threshold = imbalance_threshold
+        self.max_spread_cents = max_spread_cents
+        self.quantity = quantity
+
+    def act(
+        self,
+        market,
+        rng: random.Random,
+    ):
+        if rng.random() >= self.participation_rate:
+            return
+
+        best_bid = market.orderbook.best_bid()
+        best_ask = market.orderbook.best_ask()
+
+        if best_bid is None or best_ask is None:
+            return
+
+        spread = best_ask - best_bid
+
+        if spread > self.max_spread_cents:
+            return
+
+        bid_depth = sum(
+            order.quantity
+            for order in market.orderbook.bids[
+                best_bid
+            ]
+        )
+
+        ask_depth = sum(
+            order.quantity
+            for order in market.orderbook.asks[
+                best_ask
+            ]
+        )
+
+        total_depth = (
+            bid_depth
+            + ask_depth
+        )
+
+        if total_depth == 0:
+            return
+
+        imbalance = (
+            bid_depth
+            - ask_depth
+        ) / total_depth
+
+        # Strong bid-side pressure -> aggressive buy
+        if imbalance >= self.imbalance_threshold:
+
+            side = Side.BUY
+
+            # Cross the spread
+            price = best_ask
+
+        # Strong ask-side pressure -> aggressive sell
+        elif imbalance <= -self.imbalance_threshold:
+
+            side = Side.SELL
+
+            # Cross the spread
+            price = best_bid
+
+        else:
+            return
+
+        market.submit_order(
+            trader_id=self.trader_id,
+            side=side,
+            price=price,
+            quantity=self.quantity,
+            trader_type="liquidity_taker",
+        )
         
 class MarketMaker:
     def __init__(
@@ -67,17 +301,20 @@ class MarketMaker:
         quantity=10,
         refresh_rate=1.0,
         inventory_skew=0.05,
+        initial_cash=1_000_000_00,
     ):
         self.trader_id = trader_id
 
         self.spread_cents = spread_cents
         self.quantity = quantity
         self.refresh_rate = refresh_rate
-
-        # Price adjustment in cents per share of inventory
         self.inventory_skew = inventory_skew
 
         self.inventory = 0
+
+        # Stored in cents
+        self.initial_cash = initial_cash
+        self.cash = initial_cash
 
         self.bid_order_id = None
         self.ask_order_id = None
@@ -95,18 +332,33 @@ class MarketMaker:
         for trade in new_trades:
 
             quantity = trade["quantity"]
+            price = trade["price"]
+
+            trade_value = (
+                price * quantity
+            )
+
+            # ---------------------------------------------
+            # MARKET MAKER BOUGHT
+            # ---------------------------------------------
 
             if (
                 trade["buyer_trader_id"]
                 == self.trader_id
             ):
                 self.inventory += quantity
+                self.cash -= trade_value
+
+            # ---------------------------------------------
+            # MARKET MAKER SOLD
+            # ---------------------------------------------
 
             if (
                 trade["seller_trader_id"]
                 == self.trader_id
             ):
                 self.inventory -= quantity
+                self.cash += trade_value
 
         self.last_trade_index = len(
             trades
@@ -172,6 +424,7 @@ class MarketMaker:
                 side=Side.BUY,
                 price=bid_price,
                 quantity=self.quantity,
+                trader_type="market_maker",
             )
         )
 
@@ -181,5 +434,25 @@ class MarketMaker:
                 side=Side.SELL,
                 price=ask_price,
                 quantity=self.quantity,
+                trader_type="market_maker",
             )
+        )
+    def equity(
+        self,
+        mark_price,
+    ):
+        return (
+            self.cash
+            + self.inventory
+            * mark_price
+        )
+
+
+    def pnl(
+        self,
+        mark_price,
+    ):
+        return (
+            self.equity(mark_price)
+            - self.initial_cash
         )

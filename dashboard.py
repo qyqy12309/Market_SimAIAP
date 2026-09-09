@@ -55,6 +55,7 @@ def live_dashboard():
 
     simulation = st.session_state.simulation
     market = simulation.market
+    stats = market.get_statistics()
 
     # ------------------------------------------------------
     # SIMULATION TIMER
@@ -196,6 +197,21 @@ def live_dashboard():
     else:
         st.info("PAUSED")
 
+    # ------------------------------------------------------
+    # CHART HISTORY CONTROL
+    # ------------------------------------------------------
+
+    history_option = st.selectbox(
+        "Chart history",
+        [
+            "50 candles",
+            "100 candles",
+            "200 candles",
+            "500 candles",
+            "All",
+        ],
+        index=1,
+    )
 
     # ------------------------------------------------------
     # MARKET METRICS
@@ -206,7 +222,17 @@ def live_dashboard():
 
     spread = market.orderbook.spread()
 
+    total_removed = (
+        market.stochastic_cancellations
+        + market.forced_expirations
+    )
 
+    cancellation_rate = (
+        total_removed
+        / market.orders_submitted
+        if market.orders_submitted > 0
+        else 0
+    )
     metrics = st.columns(6)
 
 
@@ -257,6 +283,62 @@ def live_dashboard():
         f"{len(market.orderbook.trades):,}",
     )
 
+    lifecycle_metrics = st.columns(4)
+
+    lifecycle_metrics[0].metric(
+        "Orders Submitted",
+        f"{market.orders_submitted:,}",
+    )
+
+    lifecycle_metrics[1].metric(
+        "Random Cancels",
+        f"{market.stochastic_cancellations:,}",
+    )
+
+    lifecycle_metrics[2].metric(
+        "Expired Orders",
+        f"{market.forced_expirations:,}",
+    )
+
+    lifecycle_metrics[3].metric(
+        "Resting Orders",
+        f"{market.resting_order_count():,}",
+    )
+
+    stats_metrics = st.columns(5)
+
+    stats_metrics[0].metric(
+        "Avg Spread",
+        (
+            f"{stats['average_spread']:.2f}¢"
+            if stats["average_spread"] is not None
+            else "-"
+        ),
+    )
+
+    stats_metrics[1].metric(
+        "Avg |Imbalance|",
+        (
+            f"{stats['average_imbalance']:.3f}"
+            if stats["average_imbalance"] is not None
+            else "-"
+        ),
+    )
+
+    stats_metrics[2].metric(
+        "Trade Rate",
+        f"{stats['trade_rate']:.3f}",
+    )
+
+    stats_metrics[3].metric(
+        "Total Volume",
+        f"{stats['total_volume']:,}",
+    )
+
+    stats_metrics[4].metric(
+        "Realized Vol",
+        f"{stats['realized_volatility']:.6f}",
+    )
 
     st.divider()
 
@@ -390,9 +472,20 @@ def live_dashboard():
     df = pd.DataFrame(rows)
 
 
-    # Only display recent market history
-    df_chart = df.tail(80)
+    # ------------------------------------------------------
+    # SELECT VISIBLE CHART HISTORY
+    # ------------------------------------------------------
 
+    if history_option == "All":
+        df_chart = df
+    else:
+        history_size = int(
+            history_option.split()[0]
+        )
+
+        df_chart = df.tail(
+            history_size
+        )
 
     # ======================================================
     # CANDLESTICK CHART
@@ -569,19 +662,10 @@ def live_dashboard():
             ),
         )
 
-
-        total_volume = sum(
-            trade["quantity"]
-            for trade
-            in market.orderbook.trades
-        )
-
-
         st.metric(
             "Total Volume",
-            f"{total_volume:,}",
-        )
-
+            f"{stats['total_volume']:,}",
+)
 
         total_bid_depth = sum(
             order.quantity
@@ -610,6 +694,22 @@ def live_dashboard():
         st.metric(
             "Ask Depth",
             f"{total_ask_depth:,}",
+        )
+
+        st.metric(
+            "Cancellation Rate",
+            f"{cancellation_rate:.1%}",
+        )
+
+        total_maker_pnl = sum(
+            maker.pnl(market.last_price)
+            for maker
+            in simulation.market_makers
+        )
+
+        st.metric(
+            "Total Market Maker PnL",
+            f"${total_maker_pnl / 100:,.2f}",
         )
 
 
@@ -675,5 +775,56 @@ def live_dashboard():
             st.write(
                 "Waiting for the first trade..."
             )
+    # ======================================================
+    # MARKET MAKERS
+    # ======================================================
+
+    st.divider()
+
+    st.subheader("Market Makers")
+
+    maker_rows = []
+
+    for maker in simulation.market_makers:
+
+        maker_rows.append(
+            {
+                "Trader ID":
+                    maker.trader_id,
+
+                "Inventory":
+                    maker.inventory,
+
+                "Cash":
+                    f"${maker.cash / 100:,.2f}",
+
+                "Equity":
+                    (
+                        f"${maker.equity(market.last_price) / 100:,.2f}"
+                    ),
+
+                "PnL":
+                    (
+                        f"${maker.pnl(market.last_price) / 100:,.2f}"
+                    ),
+
+                "Bid Order ID":
+                    maker.bid_order_id,
+
+                "Ask Order ID":
+                    maker.ask_order_id,
+            }
+        )
+    maker_df = pd.DataFrame(
+        maker_rows
+    )
+
+    st.dataframe(
+        maker_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
             
 live_dashboard()
