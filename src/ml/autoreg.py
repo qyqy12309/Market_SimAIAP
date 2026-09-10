@@ -10,15 +10,19 @@ class AutoRegForecaster:
         lookback=20,
         horizon=1,
         lags=20,
+        minimum_training_candles=60,
     ):
         self.lookback = lookback
         self.horizon = horizon
         self.lags = lags
-        self.minimum_training_candles = max(60, 2 * self.lags + 10)
+
+        self.minimum_training_candles = max(
+            minimum_training_candles,
+            2 * self.lags + 10,
+        )
+
         self.models = {}
-
         self.is_fitted = False
-
 
 
     # ======================================================
