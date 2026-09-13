@@ -318,8 +318,7 @@ A snapshot can contain:
 Order-book imbalance is derived from best-level depth:
 
 ```text
-imbalance = (bid_depth - ask_depth)
-            / (bid_depth + ask_depth)
+imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
 ```
 
 The market also exposes aggregate statistics used by the dashboard, including:
